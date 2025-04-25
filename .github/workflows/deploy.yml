@@ -7,148 +7,79 @@ on:
     branches: [ main ]
     types: [closed]
 
+env:
+  APPLICATION_PORT: 80
+  IMAGE_NAME: ${{ github.repository }}
+  REGISTRY: ghcr.io
+
 jobs:
-  build-and-deploy:
-    name: Build and Deploy
+  build-project:
     runs-on: self-hosted
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
-    
-    env:
-      APPLICATION_PORT: 80
-      IMAGE_NAME: flowcus-web
-      CONTAINER_REGISTRY: ${{ github.repository_owner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'latest'
+          cache: 'yarn'
+          
+      - name: Install dependencies
+        run: yarn install
+        
+      - name: Build project
+        run: yarn run build
+        
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-files
+          path: ./dist
+          retention-days: 7
+
+  build-and-deploy:
+    needs: build-project
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0 # Fetch all history for proper versioning
-      
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+          name: build-files
+          path: ./dist
+          
+      - name: Display structure of downloaded files
+        run: ls -lah ./dist
+        
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          node-version: 'lts/*'
-          cache: 'npm'
-      
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            **/node_modules
-            ~/.npm
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-      
-      - name: Install dependencies
-        run: npm ci
-      
-      - name: Build project
-        run: npm run build
-      
-      - name: Generate build version
-        id: build-version
-        run: |
-          echo "VERSION=$(date +'%Y%m%d%H%M%S')-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
-      # Create a Docker cache directory
-      - name: Create Docker cache directory
-        run: mkdir -p /tmp/docker-cache
-      
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          
       - name: Build Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: false
-          tags: |
-            ${{ env.IMAGE_NAME }}:latest
-            ${{ env.IMAGE_NAME }}:${{ steps.build-version.outputs.VERSION }}
-          platforms: linux/arm64
-          load: true
-          # Use local filesystem cache instead of GitHub Actions Cache
-          cache-from: type=local,src=/tmp/docker-cache
-          cache-to: type=local,dest=/tmp/docker-cache,mode=max
-          build-args: |
-            NODE_ENV=production
-            BUILD_VERSION=${{ steps.build-version.outputs.VERSION }}
-      
+        run: docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest .
+        
+      - name: Push Docker image
+        run: docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        
+      - name: Clean up old container
+        run: |
+          docker stop ${{ github.event.repository.name }} || true
+          docker rm ${{ github.event.repository.name }}-old || true
+          docker container rename ${{ github.event.repository.name }} ${{ github.event.repository.name }}-old || true
+        continue-on-error: true
+        
       - name: Deploy container
-        id: deploy
-        run: |
-          # Stop the current container if it exists
-          docker stop ${{ env.IMAGE_NAME }} || true
-          docker rm ${{ env.IMAGE_NAME }} || true
-          
-          # Run the new container
-          docker run -d \
-            --restart unless-stopped \
-            -p ${{ env.APPLICATION_PORT }}:80 \
-            --name ${{ env.IMAGE_NAME }} \
-            --health-cmd "curl -f http://localhost:80/ || exit 1" \
-            --health-interval 30s \
-            --health-timeout 15s \
-            --health-retries 5 \
-            --health-start-period 60s \
-            ${{ env.IMAGE_NAME }}:latest
-          
-          # Output initial logs to help with debugging
-          echo "Initial container logs:"
-          sleep 10
-          docker logs ${{ env.IMAGE_NAME }}
-          
-          # Wait for the container to be healthy with a longer timeout
-          echo "Waiting for container to be healthy..."
-          timeout=120
-          while [ $timeout -gt 0 ]; do
-            if [ "$(docker inspect --format='{{.State.Health.Status}}' ${{ env.IMAGE_NAME }})" == "healthy" ]; then
-              echo "Container is healthy!"
-              break
-            fi
-            status=$(docker inspect --format='{{.State.Health.Status}}' ${{ env.IMAGE_NAME }})
-            echo "Waiting for container to be healthy... ${timeout}s remaining (current status: $status)"
-            sleep 5
-            timeout=$((timeout-5))
-          done
-          
-          if [ $timeout -le 0 ]; then
-            echo "Container failed to become healthy within the timeout period"
-            echo "Latest container logs:"
-            docker logs ${{ env.IMAGE_NAME }}
-            echo "Latest health check results:"
-            docker inspect --format='{{json .State.Health}}' ${{ env.IMAGE_NAME }} | jq
-            exit 1
-          fi
-      
-      - name: Verify deployment
-        run: |
-          # Check if the container is running
-          if ! docker ps | grep -q "${{ env.IMAGE_NAME }}"; then
-            echo "Container is not running!"
-            exit 1
-          fi
-          
-          # Verify the container is responding to HTTP requests
-          response_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ env.APPLICATION_PORT }}/)
-          echo "HTTP response code: $response_code"
-          
-          if [ "$response_code" != "200" ]; then
-            echo "Container is not responding with a 200 OK status!"
-            exit 1
-          fi
-          
-          echo "Deployment verified successfully!"
-      
-      - name: Clean up
-        if: always()
-        run: |
-          # Keep only the last 5 images with specific tags
-          docker image ls "${{ env.IMAGE_NAME }}:2*" --format "{{.Repository}}:{{.Tag}}" | sort -r | tail -n +6 | xargs -r docker image rm
-          
-          # Remove dangling images
-          docker image prune -f
-          
-          # Remove images older than 7 days that are not tagged
-          docker image prune -a -f --filter "until=168h"
+        run: docker run -d -p ${{ env.APPLICATION_PORT }}:8080 --name ${{ github.event.repository.name }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        
+      - name: Clean up Docker images
+        run: docker image prune -a -f
