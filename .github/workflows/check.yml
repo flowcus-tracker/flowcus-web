@@ -37,3 +37,8 @@ jobs:
             exit 1
           fi
           echo "Build successful!"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts
