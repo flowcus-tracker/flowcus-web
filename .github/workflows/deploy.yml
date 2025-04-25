@@ -75,73 +75,50 @@ jobs:
             NODE_ENV=production
             BUILD_VERSION=${{ steps.build-version.outputs.VERSION }}
       
-      - name: Prepare deployment
-        run: |
-          # Create a backup script to be used in case of failure
-          cat > rollback.sh << 'EOF'
-          #!/bin/bash
-          set -e
-          echo "Rolling back to previous version..."
-          if docker ps -a | grep -q "${{ env.IMAGE_NAME }}-old"; then
-            docker stop ${{ env.IMAGE_NAME }} || true
-            docker rm ${{ env.IMAGE_NAME }} || true
-            docker container rename ${{ env.IMAGE_NAME }}-old ${{ env.IMAGE_NAME }}
-            docker start ${{ env.IMAGE_NAME }}
-            echo "Rollback completed successfully"
-          else
-            echo "No previous version found for rollback"
-            exit 1
-          fi
-          EOF
-          chmod +x rollback.sh
-      
       - name: Deploy container
         id: deploy
         run: |
-          # Stop and rename the current container if it exists
-          if docker ps -a | grep -q "${{ env.IMAGE_NAME }}"; then
-            docker stop ${{ env.IMAGE_NAME }} || true
-            
-            # Only keep the old container if it's running properly
-            if [ $(docker inspect -f '{{.State.ExitCode}}' ${{ env.IMAGE_NAME }}) -eq 0 ]; then
-              # Remove any existing old backup
-              docker rm ${{ env.IMAGE_NAME }}-old || true
-              # Rename current to old as backup
-              docker container rename ${{ env.IMAGE_NAME }} ${{ env.IMAGE_NAME }}-old
-            else
-              # Current container is in a bad state, remove it
-              docker rm ${{ env.IMAGE_NAME }} || true
-            fi
-          fi
+          # Stop the current container if it exists
+          docker stop ${{ env.IMAGE_NAME }} || true
+          docker rm ${{ env.IMAGE_NAME }} || true
           
           # Run the new container
           docker run -d \
             --restart unless-stopped \
             -p ${{ env.APPLICATION_PORT }}:80 \
             --name ${{ env.IMAGE_NAME }} \
-            --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:80/ || exit 1" \
+            --health-cmd "curl -f http://localhost:80/ || exit 1" \
             --health-interval 30s \
-            --health-timeout 10s \
-            --health-retries 3 \
-            --health-start-period 40s \
+            --health-timeout 15s \
+            --health-retries 5 \
+            --health-start-period 60s \
             ${{ env.IMAGE_NAME }}:latest
           
-          # Wait for the container to be healthy
+          # Output initial logs to help with debugging
+          echo "Initial container logs:"
+          sleep 10
+          docker logs ${{ env.IMAGE_NAME }}
+          
+          # Wait for the container to be healthy with a longer timeout
           echo "Waiting for container to be healthy..."
-          timeout=60
+          timeout=120
           while [ $timeout -gt 0 ]; do
             if [ "$(docker inspect --format='{{.State.Health.Status}}' ${{ env.IMAGE_NAME }})" == "healthy" ]; then
               echo "Container is healthy!"
               break
             fi
-            echo "Waiting for container to be healthy... ${timeout}s remaining"
+            status=$(docker inspect --format='{{.State.Health.Status}}' ${{ env.IMAGE_NAME }})
+            echo "Waiting for container to be healthy... ${timeout}s remaining (current status: $status)"
             sleep 5
             timeout=$((timeout-5))
           done
           
           if [ $timeout -le 0 ]; then
             echo "Container failed to become healthy within the timeout period"
-            ./rollback.sh
+            echo "Latest container logs:"
+            docker logs ${{ env.IMAGE_NAME }}
+            echo "Latest health check results:"
+            docker inspect --format='{{json .State.Health}}' ${{ env.IMAGE_NAME }} | jq
             exit 1
           fi
       
@@ -149,10 +126,20 @@ jobs:
         run: |
           # Check if the container is running
           if ! docker ps | grep -q "${{ env.IMAGE_NAME }}"; then
-            echo "Container is not running, rolling back..."
-            ./rollback.sh
+            echo "Container is not running!"
             exit 1
           fi
+          
+          # Verify the container is responding to HTTP requests
+          response_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ env.APPLICATION_PORT }}/)
+          echo "HTTP response code: $response_code"
+          
+          if [ "$response_code" != "200" ]; then
+            echo "Container is not responding with a 200 OK status!"
+            exit 1
+          fi
+          
+          echo "Deployment verified successfully!"
       
       - name: Clean up
         if: always()
