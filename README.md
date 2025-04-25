@@ -12,7 +12,7 @@ A minimal and modern productivity app designed to help users manage their focus 
 
 This is the very first version of the app. Currently, the **Timer page** is live with basic functionality. More features like task tracking, calendar, leaderboard, and reports will be added in future updates.
 
-Live Preview: [https://advanced-flow-state-tracker.pages.dev/](https://advanced-flow-state-tracker.pages.dev/)
+Live Preview: [http://139.185.58.82/](http://139.185.58.82/)
 
 ## 📦 Features (Initial Version)
 
