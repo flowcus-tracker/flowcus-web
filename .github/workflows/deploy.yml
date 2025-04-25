@@ -7,6 +7,10 @@ on:
     branches: [ main ]
     types: [closed]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   APPLICATION_PORT: 80
   IMAGE_NAME: ${{ github.repository }}
