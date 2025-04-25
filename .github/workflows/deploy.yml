@@ -9,66 +9,154 @@ on:
 
 jobs:
   build-and-deploy:
-    # Specify this runs on your ARM64 self-hosted runner
+    name: Build and Deploy
     runs-on: self-hosted
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
     
     env:
       APPLICATION_PORT: 80
       IMAGE_NAME: vite-react-app
+      CONTAINER_REGISTRY: ${{ github.repository_owner }}
     
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for proper versioning
       
-      # Setup Node.js environment
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 'lts/*'
           cache: 'npm'
       
-      # Build Vite + React project
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            **/node_modules
+            ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      
       - name: Install dependencies
         run: npm ci
       
       - name: Build project
         run: npm run build
       
-      # Set up Docker Buildx for ARM64 builds
+      - name: Generate build version
+        id: build-version
+        run: |
+          echo "VERSION=$(date +'%Y%m%d%H%M%S')-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
-      # Build and push Docker image
-      - name: Build and push Docker image
+      - name: Build Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
-          tags: ${{ env.IMAGE_NAME }}:latest
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ steps.build-version.outputs.VERSION }}
           platforms: linux/arm64
           load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NODE_ENV=production
+            BUILD_VERSION=${{ steps.build-version.outputs.VERSION }}
       
-      # Manage containers (stop and remove old ones)
-      - name: Manage existing containers
+      - name: Prepare deployment
         run: |
-          # Stop the current container if it exists
-          docker stop ${{ env.IMAGE_NAME }} || true
-          
-          # Rename the current container (for backup) if it exists
-          docker container rename ${{ env.IMAGE_NAME }} ${{ env.IMAGE_NAME }}-old || true
-          
-          # Remove old backup container if it exists
-          docker rm ${{ env.IMAGE_NAME }}-old || true
+          # Create a backup script to be used in case of failure
+          cat > rollback.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          echo "Rolling back to previous version..."
+          if docker ps -a | grep -q "${{ env.IMAGE_NAME }}-old"; then
+            docker stop ${{ env.IMAGE_NAME }} || true
+            docker rm ${{ env.IMAGE_NAME }} || true
+            docker container rename ${{ env.IMAGE_NAME }}-old ${{ env.IMAGE_NAME }}
+            docker start ${{ env.IMAGE_NAME }}
+            echo "Rollback completed successfully"
+          else
+            echo "No previous version found for rollback"
+            exit 1
+          fi
+          EOF
+          chmod +x rollback.sh
       
-      # Deploy new container
       - name: Deploy container
+        id: deploy
         run: |
+          # Stop and rename the current container if it exists
+          if docker ps -a | grep -q "${{ env.IMAGE_NAME }}"; then
+            docker stop ${{ env.IMAGE_NAME }} || true
+            
+            # Only keep the old container if it's running properly
+            if [ $(docker inspect -f '{{.State.ExitCode}}' ${{ env.IMAGE_NAME }}) -eq 0 ]; then
+              # Remove any existing old backup
+              docker rm ${{ env.IMAGE_NAME }}-old || true
+              # Rename current to old as backup
+              docker container rename ${{ env.IMAGE_NAME }} ${{ env.IMAGE_NAME }}-old
+            else
+              # Current container is in a bad state, remove it
+              docker rm ${{ env.IMAGE_NAME }} || true
+            fi
+          fi
+          
+          # Run the new container
           docker run -d \
+            --restart unless-stopped \
             -p ${{ env.APPLICATION_PORT }}:80 \
             --name ${{ env.IMAGE_NAME }} \
+            --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:80/ || exit 1" \
+            --health-interval 30s \
+            --health-timeout 10s \
+            --health-retries 3 \
+            --health-start-period 40s \
             ${{ env.IMAGE_NAME }}:latest
+          
+          # Wait for the container to be healthy
+          echo "Waiting for container to be healthy..."
+          timeout=60
+          while [ $timeout -gt 0 ]; do
+            if [ "$(docker inspect --format='{{.State.Health.Status}}' ${{ env.IMAGE_NAME }})" == "healthy" ]; then
+              echo "Container is healthy!"
+              break
+            fi
+            echo "Waiting for container to be healthy... ${timeout}s remaining"
+            sleep 5
+            timeout=$((timeout-5))
+          done
+          
+          if [ $timeout -le 0 ]; then
+            echo "Container failed to become healthy within the timeout period"
+            ./rollback.sh
+            exit 1
+          fi
       
-      # Clean up old Docker images
+      - name: Verify deployment
+        run: |
+          # Check if the container is running
+          if ! docker ps | grep -q "${{ env.IMAGE_NAME }}"; then
+            echo "Container is not running, rolling back..."
+            ./rollback.sh
+            exit 1
+          fi
+      
       - name: Clean up
-        run: docker image prune -a -f --filter "until=24h"
+        if: always()
+        run: |
+          # Keep only the last 5 images with specific tags
+          docker image ls "${{ env.IMAGE_NAME }}:2*" --format "{{.Repository}}:{{.Tag}}" | sort -r | tail -n +6 | xargs -r docker image rm
+          
+          # Remove dangling images
+          docker image prune -f
+          
+          # Remove images older than 7 days that are not tagged
+          docker image prune -a -f --filter "until=168h"

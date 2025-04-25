@@ -1,12 +1,49 @@
-node_modules
-npm-debug.log
-Dockerfile
-.dockerignore
+# Version control
 .git
 .github
 .gitignore
-README.md
+.gitattributes
+
+# Build artifacts
+node_modules
+dist
+build
+coverage
+.coverage
+.nyc_output
+
+# Environment and configuration
+.env*
 .env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.development
+.env.test
+.env.production
+*.env
+*.log
+.npmrc
+.editorconfig
+
+# Docker files
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Documentation and misc
+README.md
+LICENSE
+*.md
+docs
+tests
+__tests__
+test
+*.test.*
+jest.config.js
+cypress
+cypress.json
+
+# Development tools
+.vscode
+.idea
+*.sublime-*
+.DS_Store
+thumbs.db
