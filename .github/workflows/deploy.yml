@@ -54,6 +54,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
+      # Create a Docker cache directory
+      - name: Create Docker cache directory
+        run: mkdir -p /tmp/docker-cache
+      
       - name: Build Docker image
         uses: docker/build-push-action@v5
         with:
@@ -64,8 +68,9 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ steps.build-version.outputs.VERSION }}
           platforms: linux/arm64
           load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Use local filesystem cache instead of GitHub Actions Cache
+          cache-from: type=local,src=/tmp/docker-cache
+          cache-to: type=local,dest=/tmp/docker-cache,mode=max
           build-args: |
             NODE_ENV=production
             BUILD_VERSION=${{ steps.build-version.outputs.VERSION }}
