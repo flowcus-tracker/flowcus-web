@@ -1,0 +1,74 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+    types: [closed]
+
+jobs:
+  build-and-deploy:
+    # Specify this runs on your ARM64 self-hosted runner
+    runs-on: self-hosted
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+    
+    env:
+      APPLICATION_PORT: 80
+      IMAGE_NAME: vite-react-app
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      # Setup Node.js environment
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+      
+      # Build Vite + React project
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build project
+        run: npm run build
+      
+      # Set up Docker Buildx for ARM64 builds
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # Build and push Docker image
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:latest
+          platforms: linux/arm64
+          load: true
+      
+      # Manage containers (stop and remove old ones)
+      - name: Manage existing containers
+        run: |
+          # Stop the current container if it exists
+          docker stop ${{ env.IMAGE_NAME }} || true
+          
+          # Rename the current container (for backup) if it exists
+          docker container rename ${{ env.IMAGE_NAME }} ${{ env.IMAGE_NAME }}-old || true
+          
+          # Remove old backup container if it exists
+          docker rm ${{ env.IMAGE_NAME }}-old || true
+      
+      # Deploy new container
+      - name: Deploy container
+        run: |
+          docker run -d \
+            -p ${{ env.APPLICATION_PORT }}:80 \
+            --name ${{ env.IMAGE_NAME }} \
+            ${{ env.IMAGE_NAME }}:latest
+      
+      # Clean up old Docker images
+      - name: Clean up
+        run: docker image prune -a -f --filter "until=24h"
