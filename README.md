@@ -23,6 +23,9 @@ Live Preview: [https://advanced-flow-state-tracker.pages.dev/](https://advanced-
 - Simple priority task section
 - Basic modern design (without TailwindCSS)
 - Fixed navigation header (Timer, Tasks, Calendar, Leaderboard, Report)
+## image
+<img src="./img.png" alt="Pomodoro Timer" width="500"/>
+
 
 ## 🛠 Tech Stack
 
